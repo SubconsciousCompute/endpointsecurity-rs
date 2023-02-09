@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf};
+use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rustc-link-lib=EndpointSecurity");
