@@ -56,7 +56,7 @@ impl std::fmt::Display for EsClientCreateError {
 
 impl std::error::Error for EsClientCreateError {}
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum EsEventType {
     AuthExec,
@@ -187,10 +187,75 @@ pub enum EsEventType {
 }
 
 #[derive(Debug)]
-pub struct EsMessage {
-    pub event: EsEventType,
+pub enum EsActionType {
+    Auth,
+    Notify,
 }
 
+#[derive(Debug)]
+pub struct EsProcess {
+    /// process pid
+    pub pid: i32,
+    /// Parent pid
+    pub ppid: i32,
+    /// groupd id
+    pub gid: i32,
+    audit_token: sys::audit_token_t,
+}
+
+impl EsProcess {
+    pub fn audit_token(&self) -> sys::audit_token_t {
+        self.audit_token
+    }
+}
+
+impl From<&sys::es_process_t> for EsProcess {
+    fn from(value: &sys::es_process_t) -> Self {
+        let pid = unsafe { bsm::audit_token_to_pid(value.audit_token) };
+
+        Self {
+            audit_token: value.audit_token,
+            ppid: value.ppid,
+            gid: value.group_id,
+            pid,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EsMessage {
+    pub action: EsActionType,
+    pub event: EsEventType,
+    pub version: u32,
+    pub seq_num: u64,
+    pub process: Option<EsProcess>,
+    pub thread_id: Option<u64>,
+}
+
+impl From<&sys::es_message_t> for EsMessage {
+    fn from(message: &sys::es_message_t) -> Self {
+        let action = match message.action_type {
+            0 => EsActionType::Auth,
+            1 => EsActionType::Notify,
+            _ => panic!("Useless"),
+        };
+
+        // SAFETY: message.event_type will (hopefully) never be out of range
+        let eve_type: EsEventType = unsafe { std::mem::transmute(message.event_type) };
+        let process = unsafe { message.process.as_ref().map(|process| process.into()) };
+        let thread_id = unsafe { message.thread.as_ref().map(|tid| tid.thread_id) };
+        Self {
+            event: eve_type,
+            version: message.version,
+            seq_num: message.seq_num,
+            action,
+            process,
+            thread_id,
+        }
+    }
+}
+
+/// Create a new client to connect to Endpoint Security.
 pub struct EsClient {
     client: *mut sys::es_client_t,
     subscribed_events: Vec<EsEventType>,
@@ -200,7 +265,13 @@ pub struct EsClient {
 impl EsClient {
     extern "C" fn handler(_c: *mut sys::es_client_t, _m: *const sys::es_message_t) {}
 
-    /// Create a new client to the ES subsystem
+    /// Create a new client that connects to the ES subsystem.
+    ///
+    /// # Example
+    /// ```
+    ///     let client = endpointsecurity_rs::EsClient::new();
+    ///     assert!(client.is_ok());
+    /// ```
     pub fn new() -> anyhow::Result<EsClient> {
         let mut client: *mut sys::es_client_t = std::ptr::null_mut();
 
@@ -214,10 +285,7 @@ impl EsClient {
             }
             let message = message.unwrap();
 
-            // SAFETY: message.event_type will (hopefully) never be out of range
-            let eve_type: EsEventType = unsafe { std::mem::transmute(message.event_type) };
-
-            _ = tx.send(EsMessage { event: eve_type });
+            _ = tx.send(message.into());
 
             // this call is just to infer the types in the closure
             Self::handler(c, msg);
@@ -261,6 +329,22 @@ impl EsClient {
         }
     }
 
+    /// returns true if call to unsubscribe is successful, otherwise false/
+    pub fn unsubscribe_all(&self) -> bool {
+        (unsafe { sys::es_unsubscribe_all(self.client) } == 0)
+    }
+
+    /// returns true if call to unsubscribe is successful, otherwise false/
+    pub fn unsubscribe(&mut self, event: EsEventType) -> bool {
+        if let Some(idx) = self.subscribed_events.iter().position(|eve| *eve == event) {
+            self.subscribed_events.swap_remove(idx);
+        }
+
+        let events = vec![event as u32];
+
+        (unsafe { sys::es_unsubscribe(self.client, events.as_ptr(), events.len() as u32) } == 0)
+    }
+
     /// This function blocks
     pub fn recv_msg(&self) -> Result<EsMessage, channel::RecvError> {
         self.rx.recv()
@@ -269,5 +353,23 @@ impl EsClient {
     /// This function doesn't block
     pub fn try_recv_msg(&self) -> Result<EsMessage, channel::TryRecvError> {
         self.rx.try_recv()
+    }
+}
+
+impl Drop for EsClient {
+    fn drop(&mut self) {
+        if unsafe { sys::es_delete_client(self.client) } != 0 {
+            println!("Failed to delete client");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+
+    #[test]
+    pub fn test_new_es_client() {
+        let client = crate::EsClient::new();
+        assert!(client.is_ok());
     }
 }
