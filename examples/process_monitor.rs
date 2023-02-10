@@ -1,20 +1,28 @@
+use endpointsecurity_rs::{EsClient, EsEventData, EsEventType};
+
 fn main() {
-    let mut client = endpointsecurity_rs::EsClient::new().unwrap();
+    let mut client = EsClient::new().unwrap();
     client
-        .add_event(endpointsecurity_rs::EsEventType::NotifyExec)
+        .add_event(EsEventType::AuthOpen)
+        //.add_event(EsEventType::NotifyWrite)
+        //.add_event(EsEventType::NotifyClose)
         .subscribe();
 
-    let mut count = 0;
-
     loop {
-        let msg = client.recv_msg();
-        println!("{:?}", msg);
-        count += 1;
-        if count == 10 {
-            println!(
-                "removed NotifyClose event: {}",
-                client.unsubscribe(endpointsecurity_rs::EsEventType::NotifyExec)
-            );
+        let msg = client.recv_msg().unwrap();
+        msg.allow(&client);
+        /*
+        match data {
+            EsEventData::NotifyWrite(file) => {
+                if file.path.contains("/dev/ttys000") {
+                    continue;
+                }
+                println!("{:?}", file);
+            }
+            a => {
+                println!("{:?}", a);
+            }
         }
+         */
     }
 }

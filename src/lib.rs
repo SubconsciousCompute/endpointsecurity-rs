@@ -14,6 +14,8 @@ mod sys {
 #[allow(unused)]
 mod bsm;
 
+mod utils;
+
 #[derive(Debug)]
 pub enum EsClientCreateError {
     InvalidArgument = 1,
@@ -68,7 +70,7 @@ pub enum EsEventType {
     AuthRename,
     AuthSignal,
     AuthUnlink,
-    NotifyExec = 9,
+    NotifyExec,
     NotifyOpen,
     NotifyFork,
     NotifyClose,
@@ -186,10 +188,43 @@ pub enum EsEventType {
     Last,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum EsActionType {
     Auth,
     Notify,
+}
+
+#[repr(u32)]
+pub enum EsMutePath {
+    Prefix,
+    Literal,
+}
+
+#[derive(Debug)]
+pub enum EsEventData {
+    NotifyOpen(EsFile),
+    NotifyWrite(EsFile),
+    // 2nd argument is true if the file was modified
+    NotifyClose((EsFile, bool)),
+}
+
+#[derive(Debug)]
+pub struct EsFile {
+    pub path: String,
+    pub path_truncated: bool,
+}
+
+impl From<&sys::es_file_t> for EsFile {
+    fn from(file: &sys::es_file_t) -> Self {
+        let path = unsafe { std::ffi::CStr::from_ptr(file.path.data) }
+            .to_string_lossy()
+            .to_string();
+
+        Self {
+            path,
+            path_truncated: file.path_truncated,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -206,6 +241,10 @@ pub struct EsProcess {
 impl EsProcess {
     pub fn audit_token(&self) -> sys::audit_token_t {
         self.audit_token
+    }
+
+    pub fn mute(&self, client: &EsClient) {
+        unsafe { sys::es_mute_process(client.client as _, &self.audit_token as _) };
     }
 }
 
@@ -226,10 +265,32 @@ impl From<&sys::es_process_t> for EsProcess {
 pub struct EsMessage {
     pub action: EsActionType,
     pub event: EsEventType,
+    pub event_data: Option<EsEventData>,
     pub version: u32,
     pub seq_num: u64,
     pub process: Option<EsProcess>,
     pub thread_id: Option<u64>,
+    message_ptr: *const sys::es_message_t,
+}
+
+impl EsMessage {
+    pub fn allow(&self, client: &EsClient) {
+        if self.action == EsActionType::Auth {
+            assert!(
+                unsafe { sys::es_respond_auth_result(client.client, self.message_ptr, 0, true) }
+                    == 0
+            );
+        }
+    }
+
+    pub fn deny(&self, client: &EsClient) {
+        if self.action == EsActionType::Auth {
+            assert!(
+                unsafe { sys::es_respond_auth_result(client.client, self.message_ptr, 1, true) }
+                    == 0
+            );
+        }
+    }
 }
 
 impl From<&sys::es_message_t> for EsMessage {
@@ -244,10 +305,27 @@ impl From<&sys::es_message_t> for EsMessage {
         let eve_type: EsEventType = unsafe { std::mem::transmute(message.event_type) };
         let process = unsafe { message.process.as_ref().map(|process| process.into()) };
         let thread_id = unsafe { message.thread.as_ref().map(|tid| tid.thread_id) };
+
+        let eve = match eve_type {
+            EsEventType::NotifyOpen => Some(EsEventData::NotifyOpen(unsafe {
+                message.event.open.file.as_ref().unwrap().into()
+            })),
+            EsEventType::NotifyWrite => Some(EsEventData::NotifyWrite(unsafe {
+                message.event.write.target.as_ref().unwrap().into()
+            })),
+            EsEventType::NotifyClose => Some(EsEventData::NotifyClose((
+                unsafe { message.event.close.target.as_ref().unwrap().into() },
+                unsafe { message.event.close.modified },
+            ))),
+            _ => None,
+        };
+
         Self {
             event: eve_type,
+            event_data: eve,
             version: message.version,
             seq_num: message.seq_num,
+            message_ptr: message as _,
             action,
             process,
             thread_id,
@@ -310,7 +388,9 @@ impl EsClient {
 
     /// Add a new event to subscribe
     pub fn add_event(&mut self, event: EsEventType) -> &mut Self {
-        self.subscribed_events.push(event);
+        if !self.subscribed_events.contains(&event) {
+            self.subscribed_events.push(event);
+        }
         self
     }
 
@@ -338,11 +418,39 @@ impl EsClient {
     pub fn unsubscribe(&mut self, event: EsEventType) -> bool {
         if let Some(idx) = self.subscribed_events.iter().position(|eve| *eve == event) {
             self.subscribed_events.swap_remove(idx);
+        } else {
+            return false;
         }
 
         let events = vec![event as u32];
 
         (unsafe { sys::es_unsubscribe(self.client, events.as_ptr(), events.len() as u32) } == 0)
+    }
+
+    /// Get the events that the user subscribed to. Returns `None` on error
+    pub fn subscriptions(&self) -> Option<Vec<EsEventType>> {
+        let mut count = 0;
+        let mut eves: *mut EsEventType = core::ptr::null_mut();
+        if unsafe {
+            sys::es_subscriptions(
+                self.client,
+                &mut count,
+                &mut eves as *mut *mut _ as *mut *mut u32,
+            )
+        } != 0
+        {
+            None
+        } else {
+            let events = unsafe { std::slice::from_raw_parts(eves, count) }.to_vec();
+
+            // im not sure if this is the correct way to free
+            extern "C" {
+                fn free(ptr: *mut std::ffi::c_void);
+            }
+            unsafe { free(eves as _) };
+
+            Some(events)
+        }
     }
 
     /// This function blocks
@@ -354,6 +462,49 @@ impl EsClient {
     pub fn try_recv_msg(&self) -> Result<EsMessage, channel::TryRecvError> {
         self.rx.try_recv()
     }
+
+    /// Suppresses events from executables that match a given path.
+    /// Returns `true` if muting was succesful.
+    pub fn mute_path(&self, path: &std::path::Path, ty: EsMutePath) -> bool {
+        (unsafe { sys::es_mute_path(self.client, path.to_string_lossy().as_ptr() as _, ty as u32) }
+            == 0)
+    }
+
+    /// Restores event delivery from a previously-muted path.
+    /// Returns `true` if muting was succesful.
+    pub fn unmute_path(&self, path: &std::path::Path, ty: EsMutePath) -> bool {
+        (unsafe {
+            sys::es_unmute_path(self.client, path.to_string_lossy().as_ptr() as _, ty as u32)
+        } == 0)
+    }
+
+    /// Restores event delivery of a subset of events from a previously-muted path.
+    pub fn unmute_path_events(
+        &self,
+        path: &std::path::Path,
+        ty: EsMutePath,
+        events: &[EsEventType],
+    ) -> bool {
+        let events: Vec<_> = events.iter().map(|event| *event as u32).collect();
+
+        (unsafe {
+            sys::es_unmute_path_events(
+                self.client,
+                path.to_string_lossy().as_ptr() as _,
+                ty as u32,
+                events.as_ptr(),
+                events.len(),
+            )
+        } == 0)
+    }
+
+    /// Restores event delivery from previously-muted paths.
+    pub fn unmute_all_paths(&self) -> bool {
+        (unsafe { sys::es_unmute_all_paths(self.client) } == 0)
+    }
+
+    /// Deletes the client
+    pub fn destroy_client(self) {}
 }
 
 impl Drop for EsClient {
