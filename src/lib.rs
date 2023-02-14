@@ -14,8 +14,6 @@ mod sys {
 #[allow(unused)]
 mod bsm;
 
-mod utils;
-
 #[derive(Debug)]
 pub enum EsClientCreateError {
     InvalidArgument = 1,
