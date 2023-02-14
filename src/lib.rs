@@ -201,11 +201,164 @@ pub enum EsMutePath {
 }
 
 #[derive(Debug)]
+pub struct EsRename {
+    pub source: EsFile,
+    pub destination_existing: Option<EsFile>,
+    pub destintaion_newpath: Option<(EsFile, String)>,
+}
+
+#[derive(Debug)]
+pub enum EsSSHLoginResult {
+    LoginExceedMaxTries,
+    LoginRootDenied,
+    AuthSuccess,
+    FailNone,
+    FailPasswd,
+    FailKBDInt,
+    FailPubKey,
+    FailHostBased,
+    FailGSSApi,
+    InvalidUser,
+}
+
+#[derive(Debug)]
+pub enum EsAddressType {
+    None,
+    Ipv4(std::net::Ipv4Addr),
+    Ipv6(std::net::Ipv6Addr),
+    NamedSocket(String),
+}
+
+impl EsAddressType {
+    fn parse(str: &sys::es_string_token_t, ty: u32) -> Self {
+        if ty == 0 {
+            EsAddressType::None
+        } else {
+            let addr_str = unsafe {
+                std::ffi::CStr::from_ptr(str.data)
+                    .to_string_lossy()
+                    .to_string()
+            };
+            match ty {
+                1 => EsAddressType::Ipv4(addr_str.parse().unwrap()),
+                2 => EsAddressType::Ipv6(addr_str.parse().unwrap()),
+                _ => panic!("Shouldn't reach here"),
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EsSshLogin {
+    pub success: bool,
+    pub result: EsSSHLoginResult,
+    pub source_address: EsAddressType,
+    pub username: String,
+    pub uid: Option<u32>,
+}
+
+impl From<&sys::es_event_openssh_login_t> for EsSshLogin {
+    fn from(value: &sys::es_event_openssh_login_t) -> Self {
+        let username = unsafe {
+            std::ffi::CStr::from_ptr(value.username.data)
+                .to_string_lossy()
+                .to_string()
+        };
+
+        let result = match value.result_type {
+            0 => EsSSHLoginResult::LoginExceedMaxTries,
+            1 => EsSSHLoginResult::LoginRootDenied,
+            2 => EsSSHLoginResult::AuthSuccess,
+            3 => EsSSHLoginResult::FailNone,
+            4 => EsSSHLoginResult::FailPasswd,
+            5 => EsSSHLoginResult::FailKBDInt,
+            6 => EsSSHLoginResult::FailPubKey,
+            7 => EsSSHLoginResult::FailHostBased,
+            8 => EsSSHLoginResult::FailGSSApi,
+            9 => EsSSHLoginResult::InvalidUser,
+            _ => panic!("Should never reach this case"),
+        };
+
+        Self {
+            success: value.success,
+            username,
+            uid: (if value.has_uid {
+                unsafe { Some(value.uid.uid) }
+            } else {
+                None
+            }),
+            result,
+            source_address: EsAddressType::parse(&value.source_address, value.source_address_type),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EsSSHLogout {
+    pub source_address: EsAddressType,
+    pub username: String,
+    pub uid: u32,
+}
+
+impl From<&sys::es_event_openssh_logout_t> for EsSSHLogout {
+    fn from(value: &sys::es_event_openssh_logout_t) -> Self {
+        Self {
+            username: unsafe {
+                std::ffi::CStr::from_ptr(value.username.data)
+                    .to_string_lossy()
+                    .to_string()
+            },
+            uid: value.uid,
+            source_address: EsAddressType::parse(&value.source_address, value.source_address_type),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum EsEventData {
+    AuthOpen(EsFile),
+    AuthRename(EsRename),
     NotifyOpen(EsFile),
+    NotifyExec(EsProcess),
     NotifyWrite(EsFile),
+    NotifyRename(EsRename),
     // 2nd argument is true if the file was modified
     NotifyClose((EsFile, bool)),
+    NotifyOpenSSHLogin(EsSshLogin),
+    NotifyOpenSSHLogout(EsSSHLogout),
+}
+
+impl From<sys::es_event_rename_t> for EsRename {
+    fn from(value: sys::es_event_rename_t) -> Self {
+        let source = unsafe { value.source.as_ref().unwrap().into() };
+
+        let mut rename_info = Self {
+            source,
+            destination_existing: None,
+            destintaion_newpath: None,
+        };
+
+        if value.destination_type == 0 {
+            rename_info.destination_existing = unsafe {
+                value
+                    .destination
+                    .existing_file
+                    .as_ref()
+                    .map(|file| file.into())
+            };
+        } else {
+            rename_info.destintaion_newpath = Some((
+                unsafe { value.destination.new_path.dir.as_ref().unwrap().into() },
+                unsafe {
+                    std::ffi::CStr::from_ptr(value.destination.new_path.filename.data)
+                        .to_string_lossy()
+                        .to_string()
+                },
+            ));
+        }
+
+        rename_info
+    }
 }
 
 #[derive(Debug)]
@@ -235,6 +388,7 @@ pub struct EsProcess {
     pub ppid: i32,
     /// groupd id
     pub gid: i32,
+    pub exe: EsFile,
     audit_token: sys::audit_token_t,
 }
 
@@ -256,6 +410,7 @@ impl From<&sys::es_process_t> for EsProcess {
             audit_token: value.audit_token,
             ppid: value.ppid,
             gid: value.group_id,
+            exe: unsafe { value.executable.as_ref().unwrap().into() },
             pid,
         }
     }
@@ -293,6 +448,12 @@ impl EsMessage {
     }
 }
 
+impl Drop for EsMessage {
+    fn drop(&mut self) {
+        unsafe { sys::es_release_message(self.message_ptr) };
+    }
+}
+
 impl From<&sys::es_message_t> for EsMessage {
     fn from(message: &sys::es_message_t) -> Self {
         let action = match message.action_type {
@@ -307,18 +468,38 @@ impl From<&sys::es_message_t> for EsMessage {
         let thread_id = unsafe { message.thread.as_ref().map(|tid| tid.thread_id) };
 
         let eve = match eve_type {
+            EsEventType::AuthOpen => Some(EsEventData::AuthOpen(unsafe {
+                message.event.open.file.as_ref().unwrap().into()
+            })),
+            EsEventType::AuthRename => Some(EsEventData::AuthRename(unsafe {
+                message.event.rename.into()
+            })),
+            EsEventType::NotifyExec => Some(EsEventData::NotifyExec(unsafe {
+                message.event.exec.target.as_ref().unwrap().into()
+            })),
             EsEventType::NotifyOpen => Some(EsEventData::NotifyOpen(unsafe {
                 message.event.open.file.as_ref().unwrap().into()
             })),
             EsEventType::NotifyWrite => Some(EsEventData::NotifyWrite(unsafe {
                 message.event.write.target.as_ref().unwrap().into()
             })),
+            EsEventType::NotifyRename => Some(EsEventData::NotifyRename(unsafe {
+                message.event.rename.into()
+            })),
             EsEventType::NotifyClose => Some(EsEventData::NotifyClose((
                 unsafe { message.event.close.target.as_ref().unwrap().into() },
                 unsafe { message.event.close.modified },
             ))),
+            EsEventType::NotifyOpenSSHLogin => Some(EsEventData::NotifyOpenSSHLogin(unsafe {
+                message.event.openssh_login.as_ref().unwrap().into()
+            })),
+            EsEventType::NotifyOpenSSHLogout => Some(EsEventData::NotifyOpenSSHLogout(unsafe {
+                message.event.openssh_logout.as_ref().unwrap().into()
+            })),
             _ => None,
         };
+
+        unsafe { sys::es_retain_message(message as _) }
 
         Self {
             event: eve_type,
@@ -362,6 +543,7 @@ impl EsClient {
                 return;
             }
             let message = message.unwrap();
+            assert!(msg as usize == message as *const _ as usize);
 
             _ = tx.send(message.into());
 
