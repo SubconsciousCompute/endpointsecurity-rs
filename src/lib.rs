@@ -315,9 +315,28 @@ impl From<&sys::es_event_openssh_logout_t> for EsSSHLogout {
 }
 
 #[derive(Debug)]
+pub struct EsUnlinkFile {
+    pub parent_dir: EsFile,
+    pub target: EsFile,
+}
+
+impl From<sys::es_event_unlink_t> for EsUnlinkFile {
+    fn from(value: sys::es_event_unlink_t) -> Self {
+        unsafe {
+            Self {
+                parent_dir: value.parent_dir.as_ref().unwrap().into(),
+                target: value.target.as_ref().unwrap().into(),
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum EsEventData {
     AuthOpen(EsFile),
     AuthRename(EsRename),
+    AuthUnlink(EsUnlinkFile),
+
     NotifyOpen(EsFile),
     NotifyExec(EsProcess),
     NotifyWrite(EsFile),
@@ -473,6 +492,9 @@ impl From<&sys::es_message_t> for EsMessage {
             })),
             EsEventType::AuthRename => Some(EsEventData::AuthRename(unsafe {
                 message.event.rename.into()
+            })),
+            EsEventType::AuthUnlink => Some(EsEventData::AuthUnlink(unsafe {
+                message.event.unlink.into()
             })),
             EsEventType::NotifyExec => Some(EsEventData::NotifyExec(unsafe {
                 message.event.exec.target.as_ref().unwrap().into()
