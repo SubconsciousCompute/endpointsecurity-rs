@@ -336,11 +336,13 @@ pub enum EsEventData {
     AuthOpen(EsFile),
     AuthRename(EsRename),
     AuthUnlink(EsUnlinkFile),
+    AuthReadDir(EsFile),
 
     NotifyOpen(EsFile),
     NotifyExec(EsProcess),
     NotifyWrite(EsFile),
     NotifyRename(EsRename),
+    NotifyReadDir(EsFile),
     // 2nd argument is true if the file was modified
     NotifyClose((EsFile, bool)),
     NotifyOpenSSHLogin(EsSshLogin),
@@ -515,6 +517,14 @@ impl From<&sys::es_message_t> for EsMessage {
             EsEventType::AuthUnlink => Some(EsEventData::AuthUnlink(unsafe {
                 message.event.unlink.into()
             })),
+            EsEventType::AuthReadDir => unsafe {
+                message
+                    .event
+                    .readdir
+                    .target
+                    .as_ref()
+                    .map(|readdir| EsEventData::AuthReadDir(readdir.into()))
+            },
             EsEventType::NotifyExec => Some(EsEventData::NotifyExec(unsafe {
                 message.event.exec.target.as_ref().unwrap().into()
             })),
@@ -531,6 +541,14 @@ impl From<&sys::es_message_t> for EsMessage {
                 unsafe { message.event.close.target.as_ref().unwrap().into() },
                 unsafe { message.event.close.modified },
             ))),
+            EsEventType::NotifyReadDir => unsafe {
+                message
+                    .event
+                    .readdir
+                    .target
+                    .as_ref()
+                    .map(|readdir| EsEventData::NotifyReadDir(readdir.into()))
+            },
             EsEventType::NotifyOpenSSHLogin => Some(EsEventData::NotifyOpenSSHLogin(unsafe {
                 message.event.openssh_login.as_ref().unwrap().into()
             })),
