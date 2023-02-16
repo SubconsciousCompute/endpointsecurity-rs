@@ -1,3 +1,5 @@
+use std::ffi::CStr;
+
 use crossbeam::channel;
 
 use block::ConcreteBlock;
@@ -343,6 +345,10 @@ pub enum EsEventData {
     NotifyClose((EsFile, bool)),
     NotifyOpenSSHLogin(EsSshLogin),
     NotifyOpenSSHLogout(EsSSHLogout),
+    NotifyLWSessionLock(EsLWSession),
+    NotifyLWSessionUnlock(EsLWSession),
+    NotifyLWSessionLogin(EsLWSession),
+    NotifyLWSessionLogout(EsLWSession),
 }
 
 impl From<sys::es_event_rename_t> for EsRename {
@@ -434,6 +440,21 @@ impl From<&sys::es_process_t> for EsProcess {
 }
 
 #[derive(Debug)]
+pub struct EsLWSession {
+    pub graphical_session_id: u32,
+    pub username: String,
+}
+
+impl EsLWSession {
+    fn from_es_type(id: u32, str: *const i8) -> Self {
+        Self {
+            graphical_session_id: id,
+            username: unsafe { CStr::from_ptr(str).to_string_lossy().to_string() },
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct EsMessage {
     pub action: EsActionType,
     pub event: EsEventType,
@@ -516,6 +537,26 @@ impl From<&sys::es_message_t> for EsMessage {
             EsEventType::NotifyOpenSSHLogout => Some(EsEventData::NotifyOpenSSHLogout(unsafe {
                 message.event.openssh_logout.as_ref().unwrap().into()
             })),
+            EsEventType::NotifyLWSessionLock => Some(EsEventData::NotifyLWSessionLock(unsafe {
+                let data = message.event.lw_session_lock.as_ref().unwrap();
+                EsLWSession::from_es_type(data.graphical_session_id, data.username.data)
+            })),
+            EsEventType::NotifyLWSessionLogin => Some(EsEventData::NotifyLWSessionLogin(unsafe {
+                let data = message.event.lw_session_login.as_ref().unwrap();
+                EsLWSession::from_es_type(data.graphical_session_id, data.username.data)
+            })),
+            EsEventType::NotifyLWSessionLogout => {
+                Some(EsEventData::NotifyLWSessionLogout(unsafe {
+                    let data = message.event.lw_session_logout.as_ref().unwrap();
+                    EsLWSession::from_es_type(data.graphical_session_id, data.username.data)
+                }))
+            }
+            EsEventType::NotifyLWSessionUnlock => {
+                Some(EsEventData::NotifyLWSessionUnlock(unsafe {
+                    let data = message.event.lw_session_unlock.as_ref().unwrap();
+                    EsLWSession::from_es_type(data.graphical_session_id, data.username.data)
+                }))
+            }
             _ => None,
         };
 
