@@ -508,9 +508,14 @@ impl From<&sys::es_message_t> for EsMessage {
         let thread_id = unsafe { message.thread.as_ref().map(|tid| tid.thread_id) };
 
         let eve = match eve_type {
-            EsEventType::AuthOpen => Some(EsEventData::AuthOpen(unsafe {
-                message.event.open.file.as_ref().unwrap().into()
-            })),
+            EsEventType::AuthOpen => unsafe {
+                message
+                    .event
+                    .open
+                    .file
+                    .as_ref()
+                    .map(|file| EsEventData::AuthOpen(file.into()))
+            },
             EsEventType::AuthRename => Some(EsEventData::AuthRename(unsafe {
                 message.event.rename.into()
             })),
@@ -525,15 +530,30 @@ impl From<&sys::es_message_t> for EsMessage {
                     .as_ref()
                     .map(|readdir| EsEventData::AuthReadDir(readdir.into()))
             },
-            EsEventType::NotifyExec => Some(EsEventData::NotifyExec(unsafe {
-                message.event.exec.target.as_ref().unwrap().into()
-            })),
-            EsEventType::NotifyOpen => Some(EsEventData::NotifyOpen(unsafe {
-                message.event.open.file.as_ref().unwrap().into()
-            })),
-            EsEventType::NotifyWrite => Some(EsEventData::NotifyWrite(unsafe {
-                message.event.write.target.as_ref().unwrap().into()
-            })),
+            EsEventType::NotifyExec => unsafe {
+                message
+                    .event
+                    .exec
+                    .target
+                    .as_ref()
+                    .map(|tar| EsEventData::NotifyExec(tar.into()))
+            },
+            EsEventType::NotifyOpen => unsafe {
+                message
+                    .event
+                    .open
+                    .file
+                    .as_ref()
+                    .map(|file| EsEventData::NotifyOpen(file.into()))
+            },
+            EsEventType::NotifyWrite => unsafe {
+                message
+                    .event
+                    .write
+                    .target
+                    .as_ref()
+                    .map(|target| EsEventData::NotifyWrite(target.into()))
+            },
             EsEventType::NotifyRename => Some(EsEventData::NotifyRename(unsafe {
                 message.event.rename.into()
             })),
@@ -549,32 +569,52 @@ impl From<&sys::es_message_t> for EsMessage {
                     .as_ref()
                     .map(|readdir| EsEventData::NotifyReadDir(readdir.into()))
             },
-            EsEventType::NotifyOpenSSHLogin => Some(EsEventData::NotifyOpenSSHLogin(unsafe {
-                message.event.openssh_login.as_ref().unwrap().into()
-            })),
-            EsEventType::NotifyOpenSSHLogout => Some(EsEventData::NotifyOpenSSHLogout(unsafe {
-                message.event.openssh_logout.as_ref().unwrap().into()
-            })),
-            EsEventType::NotifyLWSessionLock => Some(EsEventData::NotifyLWSessionLock(unsafe {
-                let data = message.event.lw_session_lock.as_ref().unwrap();
-                EsLWSession::from_es_type(data.graphical_session_id, data.username.data)
-            })),
-            EsEventType::NotifyLWSessionLogin => Some(EsEventData::NotifyLWSessionLogin(unsafe {
-                let data = message.event.lw_session_login.as_ref().unwrap();
-                EsLWSession::from_es_type(data.graphical_session_id, data.username.data)
-            })),
-            EsEventType::NotifyLWSessionLogout => {
-                Some(EsEventData::NotifyLWSessionLogout(unsafe {
-                    let data = message.event.lw_session_logout.as_ref().unwrap();
-                    EsLWSession::from_es_type(data.graphical_session_id, data.username.data)
-                }))
-            }
-            EsEventType::NotifyLWSessionUnlock => {
-                Some(EsEventData::NotifyLWSessionUnlock(unsafe {
-                    let data = message.event.lw_session_unlock.as_ref().unwrap();
-                    EsLWSession::from_es_type(data.graphical_session_id, data.username.data)
-                }))
-            }
+            EsEventType::NotifyOpenSSHLogin => unsafe {
+                message
+                    .event
+                    .openssh_login
+                    .as_ref()
+                    .map(|login| EsEventData::NotifyOpenSSHLogin(login.into()))
+            },
+            EsEventType::NotifyOpenSSHLogout => unsafe {
+                message
+                    .event
+                    .openssh_logout
+                    .as_ref()
+                    .map(|logout| EsEventData::NotifyOpenSSHLogout(logout.into()))
+            },
+            EsEventType::NotifyLWSessionLock => unsafe {
+                message.event.lw_session_lock.as_ref().map(|session| {
+                    EsEventData::NotifyLWSessionLock(EsLWSession::from_es_type(
+                        session.graphical_session_id,
+                        session.username.data,
+                    ))
+                })
+            },
+            EsEventType::NotifyLWSessionLogin => unsafe {
+                message.event.lw_session_login.as_ref().map(|session| {
+                    EsEventData::NotifyLWSessionLogin(EsLWSession::from_es_type(
+                        session.graphical_session_id,
+                        session.username.data,
+                    ))
+                })
+            },
+            EsEventType::NotifyLWSessionLogout => unsafe {
+                message.event.lw_session_logout.as_ref().map(|session| {
+                    EsEventData::NotifyLWSessionLogout(EsLWSession::from_es_type(
+                        session.graphical_session_id,
+                        session.username.data,
+                    ))
+                })
+            },
+            EsEventType::NotifyLWSessionUnlock => unsafe {
+                message.event.lw_session_unlock.as_ref().map(|session| {
+                    EsEventData::NotifyLWSessionUnlock(EsLWSession::from_es_type(
+                        session.graphical_session_id,
+                        session.username.data,
+                    ))
+                })
+            },
             _ => None,
         };
 
