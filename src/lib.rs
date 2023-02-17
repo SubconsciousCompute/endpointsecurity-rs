@@ -16,6 +16,12 @@ mod sys {
 #[allow(unused)]
 mod bsm;
 
+macro_rules! es_string_to_rs_string {
+    ($ex: expr) => {
+        CStr::from_ptr($ex).to_string_lossy().to_string()
+    };
+}
+
 #[derive(Debug)]
 pub enum EsClientCreateError {
     InvalidArgument = 1,
@@ -332,18 +338,93 @@ impl From<sys::es_event_unlink_t> for EsUnlinkFile {
 }
 
 #[derive(Debug)]
+pub struct EsCopyFile {
+    pub source: Option<EsFile>,
+    pub target_file: Option<EsFile>,
+    pub target_dir: Option<EsFile>,
+    pub target_name: String,
+    pub mode: u16,
+    pub flags: i32,
+}
+
+impl From<sys::es_event_copyfile_t> for EsCopyFile {
+    fn from(value: sys::es_event_copyfile_t) -> Self {
+        unsafe {
+            Self {
+                source: value.source.as_ref().map(|src| src.into()),
+                target_file: value.target_file.as_ref().map(|tar| tar.into()),
+                target_dir: value.target_dir.as_ref().map(|t_dir| t_dir.into()),
+                target_name: CStr::from_ptr(value.target_name.data)
+                    .to_string_lossy()
+                    .to_string(),
+                mode: value.mode,
+                flags: value.flags,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum EsDestination {
+    ExistingFile(EsFile),
+    NewPath(EsCreateMetadata),
+}
+
+#[derive(Debug)]
+pub struct EsCreateMetadata {
+    pub dir: EsFile,
+    pub filename: String,
+    pub mode: u16,
+}
+
+#[derive(Debug)]
+pub struct EsCreate {
+    pub destination: EsDestination,
+}
+
+impl From<sys::es_event_create_t> for EsCreate {
+    fn from(value: sys::es_event_create_t) -> Self {
+        let destination = match value.destination_type {
+            0 => unsafe {
+                EsDestination::ExistingFile(
+                    value.destination.existing_file.as_ref().unwrap().into(),
+                )
+            },
+            1 => {
+                let new_path = unsafe { value.destination.new_path };
+                unsafe {
+                    EsDestination::NewPath(EsCreateMetadata {
+                        dir: new_path.dir.as_ref().unwrap().into(),
+                        filename: es_string_to_rs_string!(new_path.filename.data),
+                        mode: new_path.mode,
+                    })
+                }
+            }
+            _ => {
+                panic!("EsCreate: destination type out of range")
+            }
+        };
+        Self { destination }
+    }
+}
+
+#[derive(Debug)]
 pub enum EsEventData {
     AuthOpen(EsFile),
     AuthRename(EsRename),
     AuthUnlink(EsUnlinkFile),
     AuthReadDir(EsFile),
+    AuthChroot(EsFile),
+    AuthCopyFile(EsCopyFile),
+    NotifyCopyFile(EsCopyFile),
 
     NotifyOpen(EsFile),
     NotifyExec(EsProcess),
     NotifyWrite(EsFile),
     NotifyRename(EsRename),
     NotifyReadDir(EsFile),
-    // 2nd argument is true if the file was modified
+    NotifyChroot(EsFile),
+    /// 2nd argument is true if the file was modified
     NotifyClose((EsFile, bool)),
     NotifyOpenSSHLogin(EsSshLogin),
     NotifyOpenSSHLogout(EsSSHLogout),
@@ -456,6 +537,34 @@ impl EsLWSession {
     }
 }
 
+pub struct EsUser {
+    pub uid: u32,
+    pub username: String,
+}
+
+pub struct EsLogin {
+    pub success: bool,
+    pub err: Option<String>,
+    pub user: EsUser,
+}
+
+impl From<&sys::es_event_login_login_t> for EsLogin {
+    fn from(value: &sys::es_event_login_login_t) -> Self {
+        Self {
+            success: value.success,
+            err: if !value.success {
+                Some(unsafe { es_string_to_rs_string!(value.failure_message.data) })
+            } else {
+                None
+            },
+            user: EsUser {
+                uid: unsafe { value.uid.uid },
+                username: unsafe { es_string_to_rs_string!(value.username.data) },
+            },
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct EsMessage {
     pub action: EsActionType,
@@ -507,6 +616,8 @@ impl From<&sys::es_message_t> for EsMessage {
         let process = unsafe { message.process.as_ref().map(|process| process.into()) };
         let thread_id = unsafe { message.thread.as_ref().map(|tid| tid.thread_id) };
 
+        //unsafe { message.event.login_logout.as_ref().unwrap(). }
+
         let eve = match eve_type {
             EsEventType::AuthOpen => unsafe {
                 message
@@ -529,6 +640,22 @@ impl From<&sys::es_message_t> for EsMessage {
                     .target
                     .as_ref()
                     .map(|readdir| EsEventData::AuthReadDir(readdir.into()))
+            },
+            EsEventType::AuthChroot => unsafe {
+                message
+                    .event
+                    .chroot
+                    .target
+                    .as_ref()
+                    .map(|chroot| EsEventData::AuthChroot(chroot.into()))
+            },
+            EsEventType::NotifyChroot => unsafe {
+                message
+                    .event
+                    .chroot
+                    .target
+                    .as_ref()
+                    .map(|chroot| EsEventData::NotifyChroot(chroot.into()))
             },
             EsEventType::NotifyExec => unsafe {
                 message
@@ -614,6 +741,12 @@ impl From<&sys::es_message_t> for EsMessage {
                         session.username.data,
                     ))
                 })
+            },
+            EsEventType::AuthCopyFile => unsafe {
+                Some(EsEventData::AuthCopyFile(message.event.copyfile.into()))
+            },
+            EsEventType::NotifyCopyFile => unsafe {
+                Some(EsEventData::NotifyCopyFile(message.event.copyfile.into()))
             },
             _ => None,
         };
@@ -710,7 +843,7 @@ impl EsClient {
         }
     }
 
-    /// returns true if call to unsubscribe is successful, otherwise false/
+    /// returns true if call to unsubscribe is successful, otherwise false
     pub fn unsubscribe_all(&self) -> bool {
         (unsafe { sys::es_unsubscribe_all(self.client) } == 0)
     }
