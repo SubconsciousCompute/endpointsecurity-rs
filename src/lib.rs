@@ -16,9 +16,19 @@ mod sys {
 #[allow(unused)]
 mod bsm;
 
-macro_rules! es_string_to_rs_string {
+macro_rules! es_string_to_string {
     ($ex: expr) => {
         CStr::from_ptr($ex).to_string_lossy().to_string()
+    };
+}
+
+macro_rules! es_string_to_opt_string {
+    ($ex: expr) => {
+        if $ex.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr($ex).to_string_lossy().to_string())
+        }
     };
 }
 
@@ -395,7 +405,7 @@ impl From<sys::es_event_create_t> for EsCreate {
                 unsafe {
                     EsDestination::NewPath(EsCreateMetadata {
                         dir: new_path.dir.as_ref().unwrap().into(),
-                        filename: es_string_to_rs_string!(new_path.filename.data),
+                        filename: es_string_to_string!(new_path.filename.data),
                         mode: new_path.mode,
                     })
                 }
@@ -409,6 +419,71 @@ impl From<sys::es_event_create_t> for EsCreate {
 }
 
 #[derive(Debug)]
+pub struct EsClone {
+    pub source: EsFile,
+    pub target_dir: EsFile,
+    pub name: String,
+}
+
+impl From<sys::es_event_clone_t> for EsClone {
+    fn from(value: sys::es_event_clone_t) -> Self {
+        Self {
+            source: unsafe { value.source.as_ref().unwrap().into() },
+            target_dir: unsafe { value.target_dir.as_ref().unwrap().into() },
+            name: unsafe { es_string_to_string!(value.target_name.data) },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EsMMap {
+    pub protection: i32,
+    pub max_protection: i32,
+    pub flags: i32,
+    pub file_pos: u64,
+    pub source: EsFile,
+}
+
+impl From<sys::es_event_mmap_t> for EsMMap {
+    fn from(value: sys::es_event_mmap_t) -> Self {
+        Self {
+            protection: value.protection,
+            max_protection: value.max_protection,
+            flags: value.flags,
+            file_pos: value.file_pos,
+            source: unsafe { value.source.as_ref() }.unwrap().into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct EsScreenSharingAttach {
+    pub success: bool,
+    pub source_address: EsAddressType,
+    pub viewer_appleid: Option<String>,
+    pub authentication_type: Option<String>,
+    pub session_username: Option<String>,
+    pub existing_session: bool,
+    pub graphical_session_id: u32,
+}
+
+impl From<sys::es_event_screensharing_attach_t> for EsScreenSharingAttach {
+    fn from(value: sys::es_event_screensharing_attach_t) -> Self {
+        Self {
+            success: value.success,
+            source_address: EsAddressType::parse(&value.source_address, value.source_address_type),
+            viewer_appleid: unsafe { es_string_to_opt_string!(value.viewer_appleid.data) },
+            authentication_type: unsafe {
+                es_string_to_opt_string!(value.authentication_type.data)
+            },
+            existing_session: value.existing_session,
+            graphical_session_id: value.graphical_session_id,
+            session_username: unsafe { es_string_to_opt_string!(value.viewer_appleid.data) },
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum EsEventData {
     AuthOpen(EsFile),
     AuthRename(EsRename),
@@ -417,6 +492,14 @@ pub enum EsEventData {
     AuthChroot(EsFile),
     AuthCopyFile(EsCopyFile),
     NotifyCopyFile(EsCopyFile),
+
+    NotifyClone(EsClone),
+    AuthClone(EsClone),
+
+    NotifyMMap(EsMMap),
+    AuthMMap(EsMMap),
+
+    NotifyExit(i32),
 
     NotifyOpen(EsFile),
     NotifyExec(EsProcess),
@@ -553,13 +636,13 @@ impl From<&sys::es_event_login_login_t> for EsLogin {
         Self {
             success: value.success,
             err: if !value.success {
-                Some(unsafe { es_string_to_rs_string!(value.failure_message.data) })
+                Some(unsafe { es_string_to_string!(value.failure_message.data) })
             } else {
                 None
             },
             user: EsUser {
                 uid: unsafe { value.uid.uid },
-                username: unsafe { es_string_to_rs_string!(value.username.data) },
+                username: unsafe { es_string_to_string!(value.username.data) },
             },
         }
     }
@@ -616,7 +699,9 @@ impl From<&sys::es_message_t> for EsMessage {
         let process = unsafe { message.process.as_ref().map(|process| process.into()) };
         let thread_id = unsafe { message.thread.as_ref().map(|tid| tid.thread_id) };
 
-        //unsafe { message.event.login_logout.as_ref().unwrap(). }
+        unsafe {
+            // message.event.screensharing_attach.as_ref().unwrap().;
+        }
 
         let eve = match eve_type {
             EsEventType::AuthOpen => unsafe {
@@ -747,6 +832,21 @@ impl From<&sys::es_message_t> for EsMessage {
             },
             EsEventType::NotifyCopyFile => unsafe {
                 Some(EsEventData::NotifyCopyFile(message.event.copyfile.into()))
+            },
+            EsEventType::NotifyClone => unsafe {
+                Some(EsEventData::AuthClone(message.event.clone.into()))
+            },
+            EsEventType::AuthClone => unsafe {
+                Some(EsEventData::AuthClone(message.event.clone.into()))
+            },
+            EsEventType::NotifyMMap => unsafe {
+                Some(EsEventData::NotifyMMap(message.event.mmap.into()))
+            },
+            EsEventType::AuthMMap => unsafe {
+                Some(EsEventData::AuthMMap(message.event.mmap.into()))
+            },
+            EsEventType::NotifyExit => unsafe {
+                Some(EsEventData::NotifyExit(message.event.exit.stat))
             },
             _ => None,
         };
