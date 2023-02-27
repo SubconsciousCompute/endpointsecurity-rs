@@ -1,3 +1,12 @@
+//! endpointsecurity-rs
+//!
+//! This crate provides safe bindings to the the [OSX Endpoint Security API](https://developer.apple.com/documentation/endpointsecurity).
+
+//! This crates operators over crossbeam channels where you can subscribe to the events you're interested in.
+//!
+//! Not all events are supported. If you want a event to be added, open an issue on our [github](https://github.com/SubconsciousCompute/endpointsecurity-rs) repo.
+//!
+
 use std::ffi::CStr;
 
 use crossbeam::channel;
@@ -32,18 +41,25 @@ macro_rules! es_string_to_opt_string {
     };
 }
 
+/// Possible errors returned if [EsClient::new()] fails
 #[derive(Debug)]
 pub enum EsClientCreateError {
+    /// Arguments to [EsClient] are invalid
     InvalidArgument = 1,
+    /// Internal Endpoint Security error
     Internal,
+    /// Executable isn't signed with required entitlements
     NotEntitled,
+    /// Operation not permitted
     NotPermited,
+    /// Executable didn't run as root
     NotPrivileged,
+    /// Too many clients are connected to Endpoint Security
     TooManyClients,
 }
 
 impl EsClientCreateError {
-    pub fn from_u32(code: u32) -> Option<EsClientCreateError> {
+    fn from_u32(code: u32) -> Option<EsClientCreateError> {
         match code {
             1 => Some(EsClientCreateError::InvalidArgument),
             2 => Some(EsClientCreateError::Internal),
@@ -65,7 +81,6 @@ impl std::fmt::Display for EsClientCreateError {
             EsClientCreateError::NotPermited => "Error: Caller lacks Transparency, Consent, and Control (TCC) approval from the user.",
             EsClientCreateError::NotPrivileged => "Error: Must be run as root",
             EsClientCreateError::TooManyClients => "Error: Too many connected clients",
-
         };
 
         f.write_str(err_str)
@@ -74,6 +89,10 @@ impl std::fmt::Display for EsClientCreateError {
 
 impl std::error::Error for EsClientCreateError {}
 
+/// All the events supported by Endpoint Security, see [more](https://developer.apple.com/documentation/endpointsecurity/event_types)
+///
+/// *README*: While all events are supported by the crate, only few have [EsEventData] types.
+/// If one of the event your interested in is missing, please send us a PR or open an issue on github.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum EsEventType {
@@ -204,6 +223,7 @@ pub enum EsEventType {
     Last,
 }
 
+/// The event type
 #[derive(Debug, PartialEq)]
 pub enum EsActionType {
     Auth,
@@ -216,13 +236,18 @@ pub enum EsMutePath {
     Literal,
 }
 
+/// Info returned by Notify/Auth Rename events.
 #[derive(Debug)]
 pub struct EsRename {
+    /// source file to rename
     pub source: EsFile,
+    /// destination of renamed file if filename with same name already exists
     pub destination_existing: Option<EsFile>,
+    /// destination of renamed file if filename with same name doesn't exists
     pub destintaion_newpath: Option<(EsFile, String)>,
 }
 
+/// Status returned by Es on NotifySSH events
 #[derive(Debug)]
 pub enum EsSSHLoginResult {
     LoginExceedMaxTries,
@@ -699,9 +724,7 @@ impl From<&sys::es_message_t> for EsMessage {
         let process = unsafe { message.process.as_ref().map(|process| process.into()) };
         let thread_id = unsafe { message.thread.as_ref().map(|tid| tid.thread_id) };
 
-        unsafe {
-            // message.event.screensharing_attach.as_ref().unwrap().;
-        }
+        // unsafe { message.event.screensharing_attach.as_ref().unwrap() }
 
         let eve = match eve_type {
             EsEventType::AuthOpen => unsafe {
