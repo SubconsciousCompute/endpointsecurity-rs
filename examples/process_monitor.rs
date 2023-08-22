@@ -1,18 +1,10 @@
-use endpointsecurity_rs::{EsClient, EsEventData, EsEventType};
+use endpointsecurity_rs::{Client, EventType};
 
 fn main() {
-    let mut client = EsClient::new().unwrap();
-    client.add_event(EsEventType::NotifyExec).subscribe();
+    let mut client = Client::new().unwrap();
+    client
+        .subscribe(&[EventType::NotifyCreate, EventType::NotifyWrite])
+        .unwrap();
 
-    loop {
-        let msg = client.recv_msg().unwrap();
-        if let Some(ref data) = msg.event_data {
-            match data {
-                EsEventData::NotifyExec(proc) => {
-                    println!("{:?}", proc);
-                }
-                _ => {}
-            }
-        }
-    }
+    println!("{:?}", client.subscriptions());
 }
